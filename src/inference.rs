@@ -656,7 +656,7 @@ where
         for (index, split) in splits.into_iter().enumerate() {
             let tx = tx.clone();
             let progress = split_progresses[index].clone();
-            rayon::spawn(move || {
+            let task = move || {
                 let result = evaluate_time_series_split(
                     split,
                     enable_short_term,
@@ -665,7 +665,11 @@ where
                     Some(progress),
                 );
                 let _ = tx.send((index, result));
-            });
+            };
+            #[cfg(threadless_wasm)]
+            task();
+            #[cfg(not(threadless_wasm))]
+            rayon::spawn(task);
         }
         drop(tx);
 
