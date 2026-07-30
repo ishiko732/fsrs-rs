@@ -86,4 +86,5 @@ pub use simulation::{
 // Compute optimal model parameters from review history.
 pub use training::{
     CombinedProgressState, ComputeParametersInput, TrainingConfig, benchmark, compute_parameters,
+    compute_parameters_with_progress,
 };

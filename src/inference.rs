@@ -653,29 +653,9 @@ where
         let mut next_index = 0;
         let mut outcome: Result<()> = Ok(());
 
-        for (index, split) in splits.into_iter().enumerate() {
-            let tx = tx.clone();
-            let progress = split_progresses[index].clone();
-            let task = move || {
-                let result = evaluate_time_series_split(
-                    split,
-                    enable_short_term,
-                    num_relearning_steps,
-                    training_config,
-                    Some(progress),
-                );
-                let _ = tx.send((index, result));
-            };
-            #[cfg(threadless_wasm)]
-            task();
-            #[cfg(not(threadless_wasm))]
-            rayon::spawn(task);
-        }
-        drop(tx);
-
-        for (index, result) in rx {
+        let mut process_result = |index: usize, result: Result<SplitEvaluation>| {
             if outcome.is_err() {
-                continue;
+                return false;
             }
 
             pending[index] = Some(result);
@@ -708,6 +688,40 @@ where
                 }
                 next_index += 1;
             }
+            outcome.is_ok()
+        };
+
+        for (index, split) in splits.into_iter().enumerate() {
+            let tx = tx.clone();
+            let progress = split_progresses[index].clone();
+            let task = move || {
+                let result = evaluate_time_series_split(
+                    split,
+                    enable_short_term,
+                    num_relearning_steps,
+                    training_config,
+                    Some(progress),
+                );
+                let _ = tx.send((index, result));
+            };
+            #[cfg(threadless_wasm)]
+            {
+                task();
+                let Ok((index, result)) = rx.recv() else {
+                    break;
+                };
+                if !process_result(index, result) {
+                    break;
+                }
+            }
+            #[cfg(not(threadless_wasm))]
+            rayon::spawn(task);
+        }
+        drop(tx);
+
+        #[cfg(not(threadless_wasm))]
+        for (index, result) in rx {
+            process_result(index, result);
         }
 
         if outcome.is_ok() && next_index < split_count {

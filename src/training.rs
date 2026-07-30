@@ -12,7 +12,7 @@ use crate::model::ModelConfig;
 use crate::parameter_clipper::clip_parameters;
 use crate::parameter_clipper::clip_parameters_in_place;
 use crate::parameter_initialization::{initialize_stability_parameters, smooth_and_fill};
-use crate::{DEFAULT_PARAMETERS, FSRSError};
+use crate::{DEFAULT_PARAMETERS, FSRSError, ItemProgress};
 #[cfg(test)]
 use burn::{nn::loss::Reduction, tensor::Int, tensor::Tensor, tensor::backend::Backend};
 use rand::SeedableRng;
@@ -278,7 +278,12 @@ impl Default for ComputeParametersInput {
 /// };
 /// let params = compute_parameters(input).unwrap(); // You can find unwrap here, unlike [`benchmark`].
 /// ```
-pub fn compute_parameters(
+pub fn compute_parameters(input: ComputeParametersInput) -> Result<Vec<f32>> {
+    compute_parameters_with_progress(input, |_| true)
+}
+
+/// Computes parameters while synchronously reporting progress after each training batch.
+pub fn compute_parameters_with_progress<F>(
     ComputeParametersInput {
         train_set,
         card_ids,
@@ -288,7 +293,11 @@ pub fn compute_parameters(
         training_config,
         ..
     }: ComputeParametersInput,
-) -> Result<Vec<f32>> {
+    mut observer: F,
+) -> Result<Vec<f32>>
+where
+    F: FnMut(ItemProgress) -> bool,
+{
     let finish_progress = || {
         if let Some(progress) = &progress {
             // The progress state at completion time may not indicate completion, because:
@@ -380,6 +389,7 @@ pub fn compute_parameters(
         &training_config,
         &model_config,
         progress.clone().map(|p| ProgressCollector::new(p, 0)),
+        &mut observer,
     )
     .inspect_err(|_e| {
         finish_progress();
@@ -474,6 +484,7 @@ pub fn benchmark(
         &training_config,
         &model_config,
         None,
+        &mut |_| true,
     )
     .unwrap()
 }
@@ -713,14 +724,20 @@ impl HostAdam {
 
 fn render_progress(
     progress: &mut Option<ProgressCollector>,
+    observer: &mut impl FnMut(ItemProgress) -> bool,
     epoch: usize,
     epoch_total: usize,
     items_processed: usize,
     items_total: usize,
 ) -> bool {
-    progress.as_mut().is_none_or(|progress| {
+    let keep_going = progress.as_mut().is_none_or(|progress| {
         progress.render_train(epoch, epoch_total, items_processed, items_total)
-    })
+    });
+    keep_going
+        && observer(ItemProgress {
+            current: epoch.saturating_sub(1) * items_total + items_processed,
+            total: epoch_total * items_total,
+        })
 }
 
 fn train(
@@ -729,6 +746,7 @@ fn train(
     training_config: &TrainingConfig,
     model_config: &ModelConfig,
     progress: Option<ProgressCollector>,
+    observer: &mut impl FnMut(ItemProgress) -> bool,
 ) -> Result<Vec<f32>> {
     let total_size = train_set.len();
     let iterations = (total_size / training_config.batch_size + 1) * training_config.num_epochs;
@@ -775,6 +793,7 @@ fn train(
             items_processed += batch.real_batch_size;
             let keep_going = render_progress(
                 &mut progress,
+                observer,
                 epoch,
                 training_config.num_epochs,
                 items_processed.min(total_size),
@@ -1536,6 +1555,38 @@ mod tests {
         .unwrap();
 
         assert_eq!(&parameters[17..20], &[0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_compute_parameters_with_progress_reports_batches() {
+        let mut updates = Vec::new();
+        compute_parameters_with_progress(
+            ComputeParametersInput {
+                train_set: disabled_short_term_regression_items(),
+                training_config: Some(TrainingConfig {
+                    num_epochs: 2,
+                    batch_size: 16,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |progress| {
+                updates.push(progress);
+                true
+            },
+        )
+        .unwrap();
+
+        assert!(!updates.is_empty());
+        assert!(
+            updates.windows(2).all(|pair| {
+                pair[0].current <= pair[1].current && pair[0].total == pair[1].total
+            })
+        );
+        assert_eq!(
+            updates.last().unwrap().current,
+            updates.last().unwrap().total
+        );
     }
 
     #[test]
