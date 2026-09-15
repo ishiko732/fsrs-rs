@@ -89,5 +89,5 @@ pub use simulation::{
 pub use training::{
     CombinedProgressState, ComputeParametersInput, ComputeParametersVersion,
     RecallClassificationCosts, RecallClassifierTrainingConfig, TrainingConfig, benchmark,
-    compute_parameters, compute_parameters_for_recall_classifier,
+    compute_parameters, compute_parameters_for_recall_classifier, compute_parameters_with_progress,
 };
