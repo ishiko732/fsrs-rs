@@ -396,6 +396,7 @@ pub(super) fn train_fsrs7_windowed(
     initial_parameters: &[f32],
     config: &InternalTrainingConfig,
     progress: Option<ProgressCollector>,
+    observer: &mut impl FnMut(crate::ItemProgress) -> bool,
 ) -> Result<Vec<f32>> {
     let version = ModelVersion::Fsrs7;
     let total_size = train_set.len();
@@ -521,6 +522,7 @@ pub(super) fn train_fsrs7_windowed(
                 processed += hb.predictions;
                 if !render_progress(
                     &mut progress,
+                    observer,
                     epoch,
                     config.num_epochs,
                     processed.min(total_size),
