@@ -10,7 +10,7 @@ use crate::parameter_initialization::{initialize_stability_parameters, smooth_an
 use crate::parameter_initialization_fsrs7::{
     initialize_parameters_fsrs7, smooth_initial_stabilities_fsrs7,
 };
-use crate::{DEFAULT_PARAMETERS, FSRS6_DEFAULT_PARAMETERS, FSRSError};
+use crate::{DEFAULT_PARAMETERS, FSRS6_DEFAULT_PARAMETERS, FSRSError, ItemProgress};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -536,7 +536,21 @@ fn normalized_classification_costs(
 /// # Returns
 /// A `Result<Vec<f32>>` containing the optimized parameters
 pub fn compute_parameters(input: ComputeParametersInput) -> Result<Vec<f32>> {
-    compute_parameters_inner(input, None)
+    compute_parameters_with_progress(input, |_| true)
+}
+
+/// Computes FSRS-6 or FSRS-7 parameters while synchronously reporting progress after each batch.
+///
+/// Returning `false` from the observer interrupts training with [`FSRSError::Interrupted`].
+/// Runs that return before batch training (for example, with too little data) emit no updates.
+pub fn compute_parameters_with_progress<F>(
+    input: ComputeParametersInput,
+    mut observer: F,
+) -> Result<Vec<f32>>
+where
+    F: FnMut(ItemProgress) -> bool,
+{
+    compute_parameters_inner(input, None, &mut observer)
 }
 
 /// Computes FSRS parameters with a binary-classification loss.
@@ -550,7 +564,7 @@ pub fn compute_parameters_for_recall_classifier(
     input: ComputeParametersInput,
     config: RecallClassifierTrainingConfig,
 ) -> Result<Vec<f32>> {
-    compute_parameters_inner(input, Some(config))
+    compute_parameters_inner(input, Some(config), &mut |_| true)
 }
 
 fn compute_parameters_inner(
@@ -566,6 +580,7 @@ fn compute_parameters_inner(
         ..
     }: ComputeParametersInput,
     classifier_config: Option<RecallClassifierTrainingConfig>,
+    observer: &mut impl FnMut(ItemProgress) -> bool,
 ) -> Result<Vec<f32>> {
     if let Some(config) = &classifier_config {
         config.validate()?;
@@ -697,6 +712,7 @@ fn compute_parameters_inner(
         &config,
         training_objective,
         progress.clone().map(|p| ProgressCollector::new(p, 0)),
+        observer,
     )
     .inspect_err(|_e| {
         finish_progress();
@@ -799,6 +815,7 @@ pub fn benchmark(
         &config,
         TrainingObjective::ProbabilityLogLoss,
         None,
+        &mut |_| true,
     )
     .unwrap()
 }
@@ -1184,14 +1201,20 @@ fn fsrs6_batch_grad(
 
 fn render_progress(
     progress: &mut Option<ProgressCollector>,
+    observer: &mut impl FnMut(ItemProgress) -> bool,
     epoch: usize,
     epoch_total: usize,
     items_processed: usize,
     items_total: usize,
 ) -> bool {
-    progress.as_mut().is_none_or(|progress| {
+    let keep_going = progress.as_mut().is_none_or(|progress| {
         progress.render_train(epoch, epoch_total, items_processed, items_total)
-    })
+    });
+    keep_going
+        && observer(ItemProgress {
+            current: epoch.saturating_sub(1) * items_total + items_processed,
+            total: epoch_total * items_total,
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1253,6 +1276,7 @@ fn train(
     config: &InternalTrainingConfig,
     objective: TrainingObjective,
     progress: Option<ProgressCollector>,
+    observer: &mut impl FnMut(ItemProgress) -> bool,
 ) -> Result<Vec<f32>> {
     let version = ModelVersion::from_param_count(initial_parameters.len());
     if version == ModelVersion::Fsrs7 {
@@ -1341,6 +1365,7 @@ fn train(
             processed += real_batch_size;
             if !render_progress(
                 &mut progress,
+                observer,
                 epoch,
                 config.num_epochs,
                 processed.min(total_size),
@@ -1351,4 +1376,160 @@ fn train(
         }
     }
     Ok(parameters)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        CombinedProgressState, ComputeParametersInput, ComputeParametersVersion, FSRSError,
+        FSRSItem, FSRSReview, TrainingConfig, compute_parameters, compute_parameters_with_progress,
+        evaluate_with_time_series_splits,
+    };
+
+    fn training_input(
+        version: ComputeParametersVersion,
+        with_card_ids: bool,
+    ) -> ComputeParametersInput {
+        let mut train_set = Vec::new();
+        let mut card_ids = Vec::new();
+        for card in 0..96 {
+            let reviews = [
+                FSRSReview {
+                    rating: card % 4 + 1,
+                    delta_t: 0.0,
+                },
+                FSRSReview {
+                    rating: if card % 7 == 0 { 1 } else { 3 },
+                    delta_t: 2.0,
+                },
+                FSRSReview {
+                    rating: if card % 6 == 0 { 1 } else { 4 },
+                    delta_t: (card % 14 + 1) as f32,
+                },
+                FSRSReview {
+                    rating: if card % 5 == 0 { 1 } else { 3 },
+                    delta_t: 0.25,
+                },
+            ];
+            for len in 2..=reviews.len() {
+                train_set.push(FSRSItem {
+                    reviews: reviews[..len].to_vec(),
+                });
+                card_ids.push(i64::from(card));
+            }
+        }
+        ComputeParametersInput {
+            train_set,
+            card_ids: with_card_ids.then_some(card_ids),
+            model_version: version,
+            training_config: Some(TrainingConfig {
+                num_epochs: 2,
+                batch_size: 32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn progress_reports_batches_for_both_versions_and_card_layouts() {
+        for version in [
+            ComputeParametersVersion::Fsrs6,
+            ComputeParametersVersion::Fsrs7,
+        ] {
+            for with_card_ids in [false, true] {
+                let state = CombinedProgressState::new_shared();
+                let mut input = training_input(version, with_card_ids);
+                input.progress = Some(state.clone());
+                let expected = compute_parameters(input.clone()).unwrap();
+                let mut updates = Vec::new();
+                let actual = compute_parameters_with_progress(input, |progress| {
+                    let state = state.lock().unwrap();
+                    assert!(!state.finished());
+                    assert_eq!(progress.current, state.current());
+                    assert_eq!(progress.total, state.total());
+                    updates.push(progress);
+                    true
+                })
+                .unwrap();
+                assert_eq!(
+                    actual.len(),
+                    if version == ComputeParametersVersion::Fsrs6 {
+                        21
+                    } else {
+                        34
+                    }
+                );
+                assert!(actual.iter().all(|value| value.is_finite()));
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected)
+                        .all(|(a, b)| (a - b).abs() < 1e-5)
+                );
+                assert!(updates.len() > 2);
+                assert!(updates.first().unwrap().current < updates.first().unwrap().total);
+                assert!(updates.windows(2).all(
+                    |pair| pair[0].current < pair[1].current && pair[0].total == pair[1].total
+                ));
+                let last = updates.last().unwrap();
+                assert_eq!(last.current, last.total);
+                assert!(state.lock().unwrap().finished());
+            }
+        }
+    }
+
+    #[test]
+    fn progress_can_interrupt_both_versions() {
+        for version in [
+            ComputeParametersVersion::Fsrs6,
+            ComputeParametersVersion::Fsrs7,
+        ] {
+            let mut input = training_input(version, true);
+            let state = CombinedProgressState::new_shared();
+            input.progress = Some(state.clone());
+            let mut calls = 0;
+            let result = compute_parameters_with_progress(input.clone(), |_| {
+                calls += 1;
+                false
+            });
+            assert!(matches!(result, Err(FSRSError::Interrupted)));
+            assert_eq!(calls, 1);
+            assert!(state.lock().unwrap().finished());
+            state.lock().unwrap().want_abort = true;
+            assert!(matches!(
+                compute_parameters_with_progress(input, |_| panic!("already aborted")),
+                Err(FSRSError::Interrupted)
+            ));
+        }
+    }
+
+    #[test]
+    fn time_series_progress_reports_splits_and_cancellation() {
+        for version in [
+            ComputeParametersVersion::Fsrs6,
+            ComputeParametersVersion::Fsrs7,
+        ] {
+            let input = training_input(version, true);
+            let mut current = 0;
+            let evaluation = evaluate_with_time_series_splits(input.clone(), |progress| {
+                current += 1;
+                assert_eq!(progress.current, current);
+                assert_eq!(progress.total, 5);
+                true
+            })
+            .unwrap();
+            assert_eq!(current, 5);
+            assert!(evaluation.log_loss.is_finite() && evaluation.rmse_bins.is_finite());
+            let mut calls = 0;
+            assert!(matches!(
+                evaluate_with_time_series_splits(input, |_| {
+                    calls += 1;
+                    false
+                }),
+                Err(FSRSError::Interrupted)
+            ));
+            assert_eq!(calls, 1);
+        }
+    }
 }
