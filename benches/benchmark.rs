@@ -83,9 +83,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     ])
     .unwrap();
 
-    c.bench_function("next_states", |b| b.iter(|| black_box(next_states(&fsrs))));
+    c.bench_function("benchmark/next_states", |b| {
+        b.iter(|| black_box(next_states(&fsrs)))
+    });
 
-    c.bench_function("current_retrievability", |b| {
+    c.bench_function("benchmark/current_retrievability", |b| {
         let state = MemoryState {
             stability: 51.344814,
             stability_fast: 51.344814,
@@ -101,7 +103,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
 
     {
-        let mut single_group = c.benchmark_group("calc_mem");
+        let mut single_group = c.benchmark_group("benchmark/calc_mem");
         let n_cards = 1000;
         let n_reviews = 10;
         single_group.throughput(Throughput::Elements(n_cards));
@@ -113,7 +115,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     }
 
     {
-        let mut batch_group = c.benchmark_group("calc_mem_batch");
+        let mut batch_group = c.benchmark_group("benchmark/calc_mem_batch");
         for n_cards in [1000, 10_000] {
             for n_reviews in [10, 100, 200] {
                 batch_group.throughput(Throughput::Elements(n_cards));

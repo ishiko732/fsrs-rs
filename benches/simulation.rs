@@ -79,7 +79,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             ModelVersion::Fsrs6 => &FSRS6_DEFAULT_PARAMETERS,
             ModelVersion::Fsrs7 => &DEFAULT_PARAMETERS,
         };
-        let mut group = c.benchmark_group(model_version.to_string());
+        let mut group = c.benchmark_group(format!("simulation/{model_version}"));
         group.bench_function("parallel_simulate", |b| {
             b.iter(|| black_box(parallel_simulate(&config, parameters).unwrap()))
         });

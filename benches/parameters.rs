@@ -479,7 +479,7 @@ fn benchmark_same_epoch_training(c: &mut Criterion) {
     } else {
         "collection"
     };
-    let mut group = c.benchmark_group(format!("same_epoch_training/{dataset}"));
+    let mut group = c.benchmark_group(format!("parameters/same_epoch_training/{dataset}"));
     group.sample_size(10);
     for use_card_ids in [true, false] {
         for (name, version) in [

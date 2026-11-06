@@ -1,6 +1,6 @@
 #!/bin/bash
 # Prints a Markdown table that compares Criterion's `base` baseline with the
-# latest run (`new`), using the median of each benchmark.
+# latest run (`new`), with median timings and Criterion's mean-change interval.
 #
 # Usage: bench-report.sh [criterion dir] [threshold in %]
 
@@ -33,7 +33,7 @@ if [ -z "$benches" ]; then
   exit 0
 fi
 
-echo "| Benchmark | Base | Head | Change |"
+echo "| Benchmark | Base | Head | Mean change |"
 echo "| --- | ---: | ---: | ---: |"
 while IFS= read -r bench; do
   base="$bench/base/estimates.json"
@@ -46,11 +46,19 @@ while IFS= read -r bench; do
   if [ -f "$base" ] && [ -f "$new" ]; then
     b=$(median "$base")
     h=$(median "$new")
-    change=$(awk -v b="$b" -v h="$h" -v t="$threshold" 'BEGIN {
-      pct = (h - b) / b * 100
-      mark = pct > t ? " :red_circle:" : (pct < -t ? " :green_circle:" : "")
-      printf "%+.1f%%%s", pct, mark
-    }')
+    change="comparison unavailable"
+    if [ -f "$bench/change/estimates.json" ]; then
+      change=$(jq -er '.mean | [
+        .point_estimate,
+        .confidence_interval.lower_bound,
+        .confidence_interval.upper_bound
+      ] | if all(.[]; type == "number") then @tsv else error("Invalid change estimates") end' \
+        "$bench/change/estimates.json" |
+        awk -v t="$threshold" '{
+          mark = $2 * 100 > t ? ":red_circle:" : ($3 * 100 < -t ? ":green_circle:" : "unconfirmed")
+          printf "%+.1f%% %s", $1 * 100, mark
+        }')
+    fi
     echo "| \`$id\` | $(fmt "$b") | $(fmt "$h") | $change |"
   elif [ -f "$new" ]; then
     echo "| \`$id\` | – | $(fmt "$(median "$new")") | new |"
@@ -60,6 +68,6 @@ while IFS= read -r bench; do
 done <<<"$benches"
 
 echo
-echo "Medians from Criterion. :red_circle: slower or :green_circle: faster by" \
-  "more than ${threshold}%; smaller changes are within the noise of shared" \
-  "GitHub-hosted runners."
+echo "Base and Head show median timings; Mean change compares average timings." \
+  ":red_circle: slower or :green_circle: faster by more than ${threshold}%, supported by Criterion's confidence interval." \
+  "Unconfirmed means there is insufficient evidence for a change beyond that threshold."

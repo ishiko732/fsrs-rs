@@ -57,13 +57,11 @@ jobs:
       - name: Run benchmarks
         run: |
           bench() {
-            cargo bench --bench parameters -- --warm-up-time 2 --measurement-time 4 "$@" \
-              '^(parameters|same_epoch_training)/'
+            cargo bench --bench '*' -- --sample-size 10 \
+              --warm-up-time 2 --measurement-time 4 "$@"
             FSRS_BENCH_REVLOG_CSV=tests/data/revlog.csv \
               cargo bench --bench parameters -- --warm-up-time 2 --measurement-time 4 "$@" \
-              '^same_epoch_training/csv/'
-            cargo bench --bench simulation -- --sample-size 10 \
-              --warm-up-time 2 --measurement-time 4 "$@"
+              '^parameters/same_epoch_training/csv/'
           }
           rm -rf target/criterion
           git checkout --detach HEAD^1
@@ -81,7 +79,7 @@ jobs:
           {
             echo "### Benchmarks"
             echo
-            echo "Base \`$(git rev-parse --short HEAD^1)\` (\`main\`) vs. head \`${HEAD_SHA::7}\`" \
+            echo "Base [$(git rev-parse --short HEAD^1)]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$(git rev-parse HEAD^1)) (main) vs. head [${HEAD_SHA::7}]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$HEAD_SHA)" \
               "merged into it, measured in the same job on the same runner."
             echo
             .github/workflows/bench-report.sh target/criterion 10
