@@ -62,6 +62,8 @@ jobs:
             FSRS_BENCH_REVLOG_CSV=tests/data/revlog.csv \
               cargo bench --bench parameters -- --warm-up-time 2 --measurement-time 4 "$@" \
               '^same_epoch_training/csv/'
+            cargo bench --bench simulation -- --sample-size 10 \
+              --warm-up-time 2 --measurement-time 4 "$@"
           }
           rm -rf target/criterion
           git checkout --detach HEAD^1

@@ -1,12 +1,15 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fsrs::{Card, expected_workload, expected_workload_with_existing_cards};
 use fsrs::{DEFAULT_PARAMETERS, SimulationResult, SimulatorConfig, optimal_retention, simulate};
-use fsrs::{FSRS, FSRSError};
+use fsrs::{FSRS6_DEFAULT_PARAMETERS, FSRSError, ModelVersion};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::hint::black_box;
 
-pub(crate) fn parallel_simulate(config: &SimulatorConfig) -> Result<Vec<f32>, FSRSError> {
+pub(crate) fn parallel_simulate(
+    config: &SimulatorConfig,
+    parameters: &[f32],
+) -> Result<Vec<f32>, FSRSError> {
     (70..=99)
         .into_par_iter()
         .map(|i| {
@@ -16,7 +19,7 @@ pub(crate) fn parallel_simulate(config: &SimulatorConfig) -> Result<Vec<f32>, FS
                 ..
             } = simulate(
                 config,
-                &DEFAULT_PARAMETERS,
+                parameters,
                 i as f32 / 100.0,
                 Some((i + 42).try_into().unwrap()),
                 None,
@@ -28,20 +31,20 @@ pub(crate) fn parallel_simulate(config: &SimulatorConfig) -> Result<Vec<f32>, FS
         .collect()
 }
 
-pub(crate) fn bench_optimal_retention(_inf: &FSRS, config: &SimulatorConfig) -> f32 {
-    optimal_retention(config, &[], |_v| true, None, None).unwrap()
+pub(crate) fn bench_optimal_retention(config: &SimulatorConfig, parameters: &[f32]) -> f32 {
+    optimal_retention(config, parameters, |_v| true, None, None).unwrap()
 }
 
-pub(crate) fn run_expected_workload_for_30_retentions() {
+pub(crate) fn run_expected_workload_for_30_retentions(parameters: &[f32]) {
     let config = SimulatorConfig::default();
 
     for i in 0..30 {
         let desired_retention = 0.70 + (i as f32 * 0.01);
-        black_box(expected_workload(&DEFAULT_PARAMETERS, desired_retention, &config).unwrap());
+        black_box(expected_workload(parameters, desired_retention, &config).unwrap());
     }
 }
 
-pub(crate) fn run_expected_workload_with_10000_existing_cards() {
+pub(crate) fn run_expected_workload_with_10000_existing_cards(parameters: &[f32]) {
     let config = SimulatorConfig {
         deck_size: 46500,
         learn_limit: 100,
@@ -59,13 +62,10 @@ pub(crate) fn run_expected_workload_with_10000_existing_cards() {
             ..Default::default()
         });
     }
-    black_box(
-        expected_workload_with_existing_cards(&DEFAULT_PARAMETERS, 0.9, &config, &cards).unwrap(),
-    );
+    black_box(expected_workload_with_existing_cards(parameters, 0.9, &config, &cards).unwrap());
 }
 
 pub fn criterion_benchmark(c: &mut Criterion) {
-    let fsrs = FSRS::default();
     let config = SimulatorConfig {
         deck_size: 36500,
         learn_span: 90,
@@ -74,18 +74,26 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         review_limit: 600,
         ..Default::default()
     };
-    c.bench_function("parallel_simulate", |b| {
-        b.iter(|| black_box(parallel_simulate(&config)))
-    });
-    c.bench_function("optimal_retention", |b| {
-        b.iter(|| black_box(bench_optimal_retention(&fsrs, &config)))
-    });
-    c.bench_function("expected_workload_30_retentions", |b| {
-        b.iter(run_expected_workload_for_30_retentions)
-    });
-    c.bench_function("expected_workload_with_10000_existing_cards", |b| {
-        b.iter(run_expected_workload_with_10000_existing_cards)
-    });
+    for model_version in [ModelVersion::Fsrs6, ModelVersion::Fsrs7] {
+        let parameters: &[f32] = match model_version {
+            ModelVersion::Fsrs6 => &FSRS6_DEFAULT_PARAMETERS,
+            ModelVersion::Fsrs7 => &DEFAULT_PARAMETERS,
+        };
+        let mut group = c.benchmark_group(model_version.to_string());
+        group.bench_function("parallel_simulate", |b| {
+            b.iter(|| black_box(parallel_simulate(&config, parameters).unwrap()))
+        });
+        group.bench_function("optimal_retention", |b| {
+            b.iter(|| black_box(bench_optimal_retention(&config, parameters)))
+        });
+        group.bench_function("expected_workload_30_retentions", |b| {
+            b.iter(|| run_expected_workload_for_30_retentions(parameters))
+        });
+        group.bench_function("expected_workload_with_10000_existing_cards", |b| {
+            b.iter(|| run_expected_workload_with_10000_existing_cards(parameters))
+        });
+        group.finish();
+    }
 }
 
 criterion_group!(benches, criterion_benchmark);
